@@ -82,8 +82,14 @@ pip install -r requirements.txt
 
 The model is fetched from HuggingFace on first use. Run this once while you have internet access so it's cached before training:
 ```bash
-IRIS_ENV=SERVER python -c "import iris; iris.IRISPipeline(); print('Model cached OK')"
+python -c "import iris; iris.IRISPipeline(); print('Model cached OK')"
 ```
+
+> **Note on `IRIS_ENV=SERVER`:** This flag switches the segmentation runtime from PyTorch → ONNX/TensorRT.
+> On a training box the PyTorch backend is fine and gives the same segmentation output (same model weights).
+> The train==deploy invariant that matters is the open-iris version (1.11.1) and normalization config — not the
+> inference runtime. If you see `onnxruntime` or `pycuda` errors, simply drop `IRIS_ENV=SERVER`; the results
+> will be equivalent. If you later need ONNX for the FastAPI server, see the Troubleshooting section below.
 
 If HuggingFace is slow or blocked, set a local cache dir:
 ```bash
@@ -169,26 +175,47 @@ tmux new-session -s iris           # main session
 
 ## 4. Data preparation
 
-### 4.1 Smoke-test on ONE image before batch-running
+### 4.1 Smoke-test on one identity folder before batch-running
+
+PolyU layout: `<subject>/<L|R>/<VIS|NIR>/` with 15 instances each, e.g.
+`001/L/NIR/001_L_NIR_1.tiff` … `001_L_NIR_15.tiff`.
+
 ```bash
-# Pick any single image from the dataset
-IRIS_ENV=SERVER python prepare_strips.py \
+# Run on the 15 NIR images for subject 001 left eye
+python prepare_strips.py \
     --src ~/PolyU_raw/001/L/NIR \
     --dst /tmp/smoke_test
 
-# Inspect the result — should be a clean 64×512 grayscale PNG
-ls -la /tmp/smoke_test/NIR/001_L/
+# Check output — should show 15 PNGs under NIR/001_L/
+ls /tmp/smoke_test/NIR/001_L/
+
+# Inspect the first strip dynamically (no hardcoded filename)
 python -c "
-import cv2, sys
-img = cv2.imread('/tmp/smoke_test/NIR/001_L/<filename>.png', 0)
-print('Shape:', img.shape)   # (64, 512)
+import cv2, glob, sys
+strips = sorted(glob.glob('/tmp/smoke_test/NIR/001_L/*.png'))
+if not strips:
+    sys.exit('No strips found — check seg_fail output above')
+img = cv2.imread(strips[0], 0)
+print('File :', strips[0])
+print('Shape:', img.shape)        # expect (64, 512)
 print('Min/Max:', img.min(), img.max())
+print('OK' if img.shape == (64, 512) else 'WRONG SHAPE')
 "
+```
+
+Also smoke-test one VIS image to see the red-channel extraction:
+```bash
+python prepare_strips.py \
+    --src ~/PolyU_raw/001/L/VIS \
+    --dst /tmp/smoke_test
+
+ls /tmp/smoke_test/VIS/001_L/
+# VIS seg failures are expected to be higher than NIR — check the seg_fail count
 ```
 
 ### 4.2 Batch-run PolyU (inside tmux)
 ```bash
-IRIS_ENV=SERVER python prepare_strips.py \
+python prepare_strips.py \
     --src ~/PolyU_raw \
     --dst ~/PolyU_strips
 # Watch seg_fail counts — expect more failures on VIS than NIR
@@ -253,4 +280,63 @@ python eval.py \
 # From Windows PowerShell — copy checkpoint and eval plots
 scp -r user@linux-box:~/Coupled-GAN/checkpoints C:\dev\Coupled-GAN\
 scp -r user@linux-box:~/Coupled-GAN/eval_results C:\dev\Coupled-GAN\
+```
+
+---
+
+## 7. Troubleshooting
+
+### `onnxruntime` fails with "cannot enable executable stack"
+
+This happens on kernels that block shared objects requesting an executable stack (common on
+Fedora Silverblue, RHEL, and other security-hardened systems). Two fixes:
+
+**Fix A — install onnxruntime-gpu** (different build, usually doesn't have the execstack issue):
+```bash
+pip uninstall onnxruntime -y
+pip install onnxruntime-gpu
+```
+
+**Fix B — patch the .so with patchelf** (removes the execstack request from the binary):
+```bash
+pip install patchelf    # no sudo needed
+
+# Get the exact path
+SO=$(python -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi', 'onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so'))")
+echo $SO
+
+patchelf --clear-execstack $SO
+
+# Verify fix
+python -c "import onnxruntime; print('onnxruntime OK')"
+```
+
+Then retry: `IRIS_ENV=SERVER python -c "import iris; iris.IRISPipeline(); print('OK')"`
+
+### `pycuda` not found (TensorRT error)
+
+Not needed on a training box — TensorRT is only relevant for the FastAPI server deployment.
+This error is harmless as long as the ONNX fallback works. If you're not using `IRIS_ENV=SERVER`
+at all, you'll never see this error.
+
+### open-iris HuggingFace download fails / times out
+
+```bash
+export HF_HOME=~/hf_cache
+export HF_ENDPOINT=https://hf-mirror.com   # use mirror if HF is blocked
+python -c "import iris; iris.IRISPipeline(); print('OK')"
+```
+
+### GPU not visible to PyTorch after conda install
+
+```bash
+# Check driver is alive
+nvidia-smi
+
+# Check PyTorch sees it
+python -c "import torch; print(torch.cuda.is_available(), torch.version.cuda)"
+
+# If CUDA version mismatch, reinstall PyTorch matching your nvidia-smi CUDA version:
+pip uninstall torch torchvision -y
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```

@@ -65,12 +65,23 @@ def normalize_strip(mono: np.ndarray, pipeline, eye_side: str):
         strip   (np.ndarray uint8, shape 64×512) — normalized, enhanced, soft-filled.
         mask    (np.ndarray bool,  shape 64×512) — True = valid iris pixel.
         success (bool) — False if segmentation/normalization failed.
+
+    API note (open-iris 1.11.1):
+        IRISPipeline.run(ir_image) expects an IRImage dataclass, not bare kwargs.
+        We wrap the numpy array in iris.IRImage and pass it positionally.
+        Failures surface as exceptions (not error-dict returns), so we use try/except.
     """
-    out = pipeline(img_data=mono, eye_side=eye_side)
-    if out.get("error") is not None:
+    try:
+        import iris as _iris  # lazy — not available on Windows dev machine
+        ir_image = _iris.IRImage(img_data=mono, eye_side=eye_side)
+        pipeline(ir_image)
+    except Exception:
         return None, None, False
 
-    norm = pipeline.call_trace.get("normalization")
+    try:
+        norm = pipeline.call_trace["normalization"]   # PipelineCallTraceStorage, not a plain dict
+    except (KeyError, AttributeError, TypeError):
+        return None, None, False
     if norm is None:
         return None, None, False
 
