@@ -1,111 +1,77 @@
+"""
+dataset.py — CrossSpectralPairs dataset for CpGAN training.
+
+Returns (vis_strip, nir_strip, label) where label=1 for genuine (same identity)
+and label=0 for impostor (different identity), 50/50 balanced.
+
+Augmentation: circular horizontal roll only (simulates eye/head rotation on the angular
+axis). RandomRotation and RandomHorizontalFlip are intentionally absent — both are
+semantically wrong for iris strips and destroy identity information.
+"""
+
+import glob
+import os
 import random
-from torch.utils.data import Dataset, DataLoader
-from torchvision import datasets, transforms, utils
+
 import torch
-from utils import *
+import torchvision.transforms.functional as TF
+from PIL import Image
+from torch.utils.data import Dataset
 
 
-class ImageFolderWithPaths(datasets.ImageFolder):
-    """Custom dataset that includes image file paths. Extends
-    torchvision.datasets.ImageFolder
+def _index(root: str) -> dict:
+    """Build {identity: [file_paths]} from <root>/<identity>/*.png."""
+    d = {}
+    for idd in sorted(os.listdir(root)):
+        paths = glob.glob(os.path.join(root, idd, "*.png"))
+        if paths:
+            d[idd] = paths
+    return d
+
+
+class CrossSpectralPairs(Dataset):
+    """Returns (vis_strip [1,64,512], nir_strip [1,64,512], label float).
+
+    label = 1.0 for genuine (same identity), 0.0 for impostor (different identity).
     """
 
-    # override the __getitem__ method. this is the method that dataloader calls
-    def __getitem__(self, index):
-        # this is what ImageFolder normally returns
-        original_tuple = super(ImageFolderWithPaths, self).__getitem__(index)
-        # the image file path
-        path = self.imgs[index][0]
-        # make a new tuple that includes original and the path
-        tuple_with_path = (original_tuple + (path,))
-        return tuple_with_path
+    def __init__(self, vis_root: str, nir_root: str, ids: list,
+                 train: bool = True, shift_pixel: int = 14, shift_prob: float = 0.5):
+        self.vis = _index(vis_root)
+        self.nir = _index(nir_root)
+        # only keep identities that have strips in BOTH spectra and belong to this split
+        self.ids = [i for i in ids if i in self.vis and i in self.nir]
+        assert self.ids, (
+            f"No identities found in both VIS ({vis_root}) and NIR ({nir_root}) "
+            f"for the provided split. Check paths and make_splits.py output."
+        )
+        self.train = train
+        self.shift_pixel = shift_pixel
+        self.shift_prob = shift_prob
 
+    def __len__(self) -> int:
+        # nominal epoch size = total number of VIS strips across split identities
+        return sum(len(self.vis[i]) for i in self.ids)
 
-class ContrastiveDataset(Dataset):
-    def __init__(self, morph_dataset, photo_dataset, positive_prob=0.5):
-        super().__init__()
-        self.print = morph_dataset
-        self.photo = photo_dataset
-        self.positive_prob = positive_prob
+    def _load(self, path: str) -> torch.Tensor:
+        """Load a strip PNG and return a [1, 64, 512] tensor in [-1, 1]."""
+        img = Image.open(path).convert("L")
+        t = TF.to_tensor(img)                              # [1, 64, 512] in [0, 1]
+        if self.train and random.random() < self.shift_prob:
+            # Circular shift on the angular (width) axis — simulates iris rotation.
+            # Applied independently per strip so the model learns shift invariance.
+            s = random.randint(-self.shift_pixel, self.shift_pixel)
+            t = torch.roll(t, shifts=s, dims=-1)
+        return TF.normalize(t, [0.5], [0.5])               # -> [-1, 1]
 
-        print(len(self.photo))  ### any random folder
-        print(len(self.print))
-
-        self.positive_h = {}
-        self.negative_h = {}
-
-        for i in range(len(self.print)):
-            # contruct the positive pair correspondence
-            img_address = self.print.imgs[i][0]
-            id = img_address.split('/')[-2]
-            if id in self.positive_h:
-                self.positive_h[id].append(i)
-            else:
-                self.positive_h[id] = [i]
-            # construct the negative pair correspondence
-            for j in range(len(self.photo.imgs)):
-                profile_address = self.photo.imgs[j][0]
-                if id in profile_address:
-                    if id in self.negative_h:
-                        self.negative_h[id].append(j)
-                    else:
-                        self.negative_h[id] = [j]
-
-    def __getitem__(self, index):
-        same_class = random.uniform(0, 1)
-        same_class = same_class > self.positive_prob
-        img_0, label_0 = self.print[index]
-
-        if same_class:  # pick a positive sample
-            img_address = self.print.imgs[index][0]
-            id = img_address.split('/')[-2]
-            idx_positive = self.positive_h[id]
-            rnd_idx = random.randint(0, len(idx_positive) - 1)
-            idx_positive = idx_positive[rnd_idx]
-            img_1, label_1 = self.print[idx_positive]
+    def __getitem__(self, _):
+        genuine = random.random() < 0.5
+        ida = random.choice(self.ids)
+        vis = self._load(random.choice(self.vis[ida]))
+        if genuine:
+            nir = self._load(random.choice(self.nir[ida]))
         else:
-            img_address = self.print.imgs[index][0]
-            id = img_address.split('/')[-2]
-            idx_neg = self.negative_h[id]
-            rnd_idx = random.randint(0, len(idx_neg) - 1)
-            idx_neg = idx_neg[rnd_idx]
-            img_1, label_1 = self.photo[idx_neg]
-
-        return img_0, img_1, same_class
-
-    def __len__(self):
-        # return min(len(self.morph), len(self.photo))
-        return len(self.print)
-
-
-def fixed_image_standardization(image_tensor):
-    # processed_tensor = (image_tensor - 127.5) / 128.0
-    processed_tensor = (image_tensor - .5) / .5
-    return processed_tensor
-
-
-def get_dataset(args):
-    mean = [0.5, 0.5, 0.5]
-    std = [0.5, 0.5, 0.5]
-
-    photo_dataset = datasets.ImageFolder(
-        args.photo_folder,
-        transforms.Compose([
-            transforms.RandomRotation(15),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ]))
-
-    print_dataset = datasets.ImageFolder(
-        args.print_folder,
-        transforms.Compose([
-            transforms.RandomRotation(15),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ]))
-
-    train_loader = torch.utils.data.DataLoader(
-        ContrastiveDataset(print_dataset, photo_dataset), batch_size=args.batch_size, shuffle=True, pin_memory=True)
-    return train_loader
+            idb = random.choice([i for i in self.ids if i != ida])
+            nir = self._load(random.choice(self.nir[idb]))
+        label = torch.tensor(1.0 if genuine else 0.0)
+        return vis, nir, label

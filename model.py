@@ -9,12 +9,49 @@ from torch.autograd import Function
 
 
 # https://github.com/znxlwm/pytorch-pix2pix/blob/master/network.py
+class IrisEncoder(nn.Module):
+    """Encoder-only path for Milestone-0 contrastive Siamese.
+
+    Mirrors the UNet encoder exactly (conv1-conv6 + fc1) but instantiates no decoder,
+    so forward() returns only the 128-d embedding. Useful for the gate check before
+    adding GAN complexity.
+
+    Input:  [B, 1, 64, 512]  — single-channel 64×512 grayscale strip in [-1, 1]
+    Output: [B, feat_dim]    — L2-normalizable embedding
+    """
+
+    def __init__(self, d: int = 64, feat_dim: int = 128):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, d, 4, 2, 1)
+        self.conv2 = nn.Conv2d(d, d * 2, 4, 2, 1)
+        self.conv2_bn = nn.BatchNorm2d(d * 2)
+        self.conv3 = nn.Conv2d(d * 2, d * 4, 4, 2, 1)
+        self.conv3_bn = nn.BatchNorm2d(d * 4)
+        self.conv4 = nn.Conv2d(d * 4, d * 8, 4, 2, 1)
+        self.conv4_bn = nn.BatchNorm2d(d * 8)
+        self.conv5 = nn.Conv2d(d * 8, d * 8, 4, 2, 1)
+        self.conv5_bn = nn.BatchNorm2d(d * 8)
+        self.conv6 = nn.Conv2d(d * 8, d * 8, 4, 2, 1)
+        # fc1: 6 stride-2 convs on 64×512 → spatial 1×8, channels 512 → flat 4096
+        self.fc1 = nn.Linear(4096, feat_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bs = x.size(0)
+        e = self.conv1(x)
+        e = self.conv2_bn(self.conv2(torch.nn.functional.leaky_relu(e, 0.2)))
+        e = self.conv3_bn(self.conv3(torch.nn.functional.leaky_relu(e, 0.2)))
+        e = self.conv4_bn(self.conv4(torch.nn.functional.leaky_relu(e, 0.2)))
+        e = self.conv5_bn(self.conv5(torch.nn.functional.leaky_relu(e, 0.2)))
+        e = self.conv6(torch.nn.functional.leaky_relu(e, 0.2))
+        return self.fc1(e.view(bs, -1))
+
+
 class UNet(nn.Module):
     # initializers
     def __init__(self, d=64, feat_dim=128):
         super(UNet, self).__init__()
         # Unet encoder
-        self.conv1 = nn.Conv2d(3, d, 4, 2, 1)
+        self.conv1 = nn.Conv2d(1, d, 4, 2, 1)    # 1-channel grayscale strip input
         self.conv2 = nn.Conv2d(d, d * 2, 4, 2, 1)
         self.conv2_bn = nn.BatchNorm2d(d * 2)
         self.conv3 = nn.Conv2d(d * 2, d * 4, 4, 2, 1)
@@ -41,7 +78,7 @@ class UNet(nn.Module):
         self.deconv4_bn = nn.BatchNorm2d(d * 8)
         self.deconv5 = nn.ConvTranspose2d(640, d * 4, 4, 2, 1)
         self.deconv5_bn = nn.BatchNorm2d(d * 4)
-        self.deconv6 = nn.ConvTranspose2d(320, 3, 4, 2, 1)
+        self.deconv6 = nn.ConvTranspose2d(320, 1, 4, 2, 1)   # 1-channel output
         self.deconv6_bn = nn.BatchNorm2d(d * 2)
         self.deconv7 = nn.ConvTranspose2d(d * 2 * 2, d, 4, 2, 1)
         self.deconv7_bn = nn.BatchNorm2d(d)
@@ -457,7 +494,12 @@ class Mapper(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, in_channels=3, img_size=512):
+    """Simple global discriminator for LSGAN on 1-channel 64×512 iris strips.
+
+    4 stride-2 conv blocks: 64×512 → 4×32, 128 channels → flat 16384.
+    """
+
+    def __init__(self, in_channels=1):
         super(Discriminator, self).__init__()
 
         def discriminator_block(in_filters, out_filters, bn=True):
@@ -473,15 +515,9 @@ class Discriminator(nn.Module):
             *discriminator_block(32, 64),
             *discriminator_block(64, 128),
         )
-        # The height and width of downsampled image
-        ds_size = img_size // 2 ** 4
+        # 4 stride-2 blocks on 64×512: H→4, W→32, C=128 → flat = 16384
         self.D1 = nn.Linear(16384, 1)
-        self.D2 = nn.Linear(128 * ds_size ** 2, 1)
 
-    def forward(self, img1):
-        # Determine validity of first image
-        out = self.shared_conv(img1)
-        out = out.view(out.shape[0], -1)
-        validity1 = self.D1(out)
-
-        return validity1
+    def forward(self, img):
+        out = self.shared_conv(img)
+        return self.D1(out.view(out.shape[0], -1))
