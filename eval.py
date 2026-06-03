@@ -96,6 +96,8 @@ def evaluate(net_vis, net_nir, vis_root: str, nir_root: str, ids: list,
                 out = net(strips[i:i + batch_size])
                 # UNet returns (reconstructed_image, embedding); IrisEncoder returns embedding only
                 emb = out[1] if isinstance(out, tuple) else out
+                # L2-normalize to match training (embeddings are unit-sphere vectors)
+                emb = torch.nn.functional.normalize(emb, p=2, dim=1)
                 parts.append(emb.cpu().numpy())
             embs[idd] = np.concatenate(parts, axis=0)
         return embs

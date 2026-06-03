@@ -95,8 +95,8 @@ def main():
         for vis, nir, lbl in train_loader:
             vis, nir, lbl = vis.to(device), nir.to(device), lbl.to(device)
 
-            emb_vis = net_vis(vis)
-            emb_nir = net_nir(nir)
+            emb_vis = F.normalize(net_vis(vis), p=2, dim=1)
+            emb_nir = F.normalize(net_nir(nir), p=2, dim=1)
 
             loss, dist = contrastive_loss(emb_vis, emb_nir, lbl, margin_t)
 

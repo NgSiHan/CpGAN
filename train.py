@@ -62,6 +62,9 @@ def main():
     ap.add_argument("--shift_pixel", type=int,   default=14)
     ap.add_argument("--shift_prob",  type=float, default=0.5)
     ap.add_argument("--save_dir",    default="checkpoints/cpgan")
+    ap.add_argument("--reset_optimizer", action="store_true",
+                    help="Reset optimizer/LR to args.lr instead of restoring from checkpoint. "
+                         "Use when resuming with new hyperparameters (e.g. changed margin).")
     args = ap.parse_args()
 
     assert torch.cuda.is_available(), "CUDA not available — check NVIDIA driver / torch build"
@@ -116,10 +119,13 @@ def main():
         if "disc_vis" in state:
             disc_vis.load_state_dict(state["disc_vis"])
             disc_nir.load_state_dict(state["disc_nir"])
-        if "optimizer_G" in state:
-            optimizer_G.load_state_dict(state["optimizer_G"])
-        if "optimizer_D" in state:
-            optimizer_D.load_state_dict(state["optimizer_D"])
+        if args.reset_optimizer:
+            print("  --reset_optimizer: starting fresh LR (optimizer state from checkpoint ignored)")
+        else:
+            if "optimizer_G" in state:
+                optimizer_G.load_state_dict(state["optimizer_G"])
+            if "optimizer_D" in state:
+                optimizer_D.load_state_dict(state["optimizer_D"])
         start_epoch = state.get("epoch", 0) + 1
         best_eer    = state.get("val_eer", 1.0)
         print(f"  Resuming from epoch {start_epoch}, best EER so far: {best_eer:.4f}")
@@ -149,6 +155,14 @@ def main():
             with torch.autocast("cuda"):
                 fake_vis, emb_vis = net_vis(vis)
                 fake_nir, emb_nir = net_nir(nir)
+
+                # L2-normalize onto unit sphere before computing distances.
+                # Prevents embeddings drifting to arbitrary scale — without this the
+                # margin becomes meaningless as distances grow unbounded and the
+                # impostor-push term cycles between dead and explosive.
+                # On unit sphere: squared-L2 ∈ [0, 4], margin should be in ~[0.5, 2.0].
+                emb_vis = F.normalize(emb_vis, p=2, dim=1)
+                emb_nir = F.normalize(emb_nir, p=2, dim=1)
 
                 loss_c, dist = contrastive_loss(emb_vis, emb_nir, lbl, args.margin)
 
