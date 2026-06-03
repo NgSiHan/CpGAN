@@ -93,7 +93,10 @@ def evaluate(net_vis, net_nir, vis_root: str, nir_root: str, ids: list,
             # process in sub-batches to avoid OOM on large identities
             parts = []
             for i in range(0, len(strips), batch_size):
-                parts.append(net(strips[i:i + batch_size]).cpu().numpy())
+                out = net(strips[i:i + batch_size])
+                # UNet returns (reconstructed_image, embedding); IrisEncoder returns embedding only
+                emb = out[1] if isinstance(out, tuple) else out
+                parts.append(emb.cpu().numpy())
             embs[idd] = np.concatenate(parts, axis=0)
         return embs
 

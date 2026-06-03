@@ -127,7 +127,7 @@ def main():
     adversarial_loss = torch.nn.MSELoss().to(device)
     l2_loss          = torch.nn.MSELoss().to(device)
 
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler("cuda")
 
     for epoch in range(start_epoch, start_epoch + args.epochs):
         net_vis.train(); net_nir.train()
