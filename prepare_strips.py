@@ -43,7 +43,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from iris_norm import STRIP_H, STRIP_W, normalize_strip, to_mono  # noqa: F401 (re-exported)
+from iris_norm import STRIP_H, STRIP_W, build_segmenter, normalize_strip, to_mono  # noqa: F401
 
 IMG_EXTS = {".tif", ".tiff", ".jpg", ".jpeg", ".png", ".bmp"}
 EYE_MAP = {"L": "left", "R": "right", "left": "left", "right": "right"}
@@ -94,15 +94,31 @@ def parse_meta(path: Path, dataset: str):
 # Main
 # --------------------------------------------------------------------------- #
 def main():
-    ap = argparse.ArgumentParser(description="RAW iris -> 64x512 normalized strips (open-iris)")
+    ap = argparse.ArgumentParser(description="RAW iris -> 64x512 normalized strips")
     ap.add_argument("--src", required=True, help="root folder of RAW images (searched recursively)")
     ap.add_argument("--dst", required=True, help="output root for strips")
     ap.add_argument("--dataset", default="polyu", choices=["polyu", "cuviris"])
+    # --- segmentation backend ---
+    ap.add_argument("--backend", default="cvrl", choices=["cvrl", "openiris"],
+                    help="cvrl = Notre Dame VIS-capable segmenter (default); openiris = Worldcoin NIR-only")
+    ap.add_argument("--mask_model", default="nestedsharedatrousresunet-006-0.028214-maskIoU-0.938446.pth",
+                    help="CVRL mask UNet++ weights (.pth)")
+    ap.add_argument("--circle_model", default="resnet18-027-0.008222-maskIoU-0.967159.pth",
+                    help="CVRL circle ResNet18 weights (.pth)")
+    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    # --- post-processing ablation toggles (both default ON to match prior behaviour) ---
+    ap.add_argument("--no_enhance", action="store_true",
+                    help="disable background-subtract + CLAHE (enhance_strip)")
+    ap.add_argument("--no_soft_fill", action="store_true",
+                    help="disable mask soft-fill (recommended to try: can hurt cross-spectral matching)")
     args = ap.parse_args()
 
-    import iris  # noqa: E402  (lazy import; needs the cached HF segmentation model)
-
-    pipeline = iris.IRISPipeline()      # default conf: LinearNormalization node named "normalization"
+    pipeline = build_segmenter(args.backend, device=args.device,
+                               mask_model_path=args.mask_model,
+                               circle_model_path=args.circle_model)
+    enhance = not args.no_enhance
+    soft_fill = not args.no_soft_fill
+    print(f"backend={args.backend}  enhance={enhance}  soft_fill={soft_fill}")
 
     src_root, dst_root = Path(args.src), Path(args.dst)
     files = [f for f in src_root.rglob("*") if f.suffix.lower() in IMG_EXTS]
@@ -121,7 +137,8 @@ def main():
             read_fail += 1
             continue
 
-        strip, mask, success = normalize_strip(mono, pipeline, eye_side)
+        strip, mask, success = normalize_strip(mono, pipeline, eye_side,
+                                               enhance=enhance, soft_fill=soft_fill)
         if not success:
             seg_fail += 1
             continue

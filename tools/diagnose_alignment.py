@@ -196,14 +196,32 @@ def main():
     ap.add_argument("--dataset", default="polyu", choices=["polyu", "cuviris"])
     ap.add_argument("--n", type=int, default=12, help="number of eyes to sample")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--oracle", action="store_true", help="also emit NIR-geometry oracle VIS strip")
+    ap.add_argument("--oracle", action="store_true", help="also emit NIR-geometry oracle VIS strip (open-iris only)")
+    ap.add_argument("--backend", default="cvrl", choices=["cvrl", "openiris"],
+                    help="segmentation backend to diagnose (default cvrl)")
+    ap.add_argument("--mask_model", default="nestedsharedatrousresunet-006-0.028214-maskIoU-0.938446.pth")
+    ap.add_argument("--circle_model", default="resnet18-027-0.008222-maskIoU-0.967159.pth")
+    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    ap.add_argument("--no_enhance", action="store_true", help="disable enhance_strip (match prepare_strips ablation)")
+    ap.add_argument("--no_soft_fill", action="store_true", help="disable mask soft-fill")
     args = ap.parse_args()
 
     random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
 
-    import iris  # noqa: E402  (lazy; needs cached HF seg model)
-    pipeline = iris.IRISPipeline()
+    from iris_norm import build_segmenter  # noqa: E402
+    pipeline = build_segmenter(args.backend, device=args.device,
+                               mask_model_path=args.mask_model, circle_model_path=args.circle_model)
+    enhance = not args.no_enhance
+    soft_fill = not args.no_soft_fill
+
+    iris = None                          # open-iris module, only loaded for overlays/oracle
+    if args.backend == "openiris":
+        import iris  # noqa: E402,F811  (cached HF seg model)
+    elif args.oracle:
+        print("  [warn] --oracle requires the open-iris backend; ignoring it for cvrl.")
+        args.oracle = False
+    print(f"backend={args.backend}  enhance={enhance}  soft_fill={soft_fill}")
 
     idx = build_eye_index(Path(args.src), args.dataset)
     eyes = [k for k, v in idx.items() if "VIS" in v and "NIR" in v]
@@ -231,19 +249,20 @@ def main():
         nir_mono = to_mono(nir_path, "NIR")
 
         # finished, training-identical strips (each independently segmented)
-        vis_strip, _, vis_ok = normalize_strip(vis_mono, pipeline, side)
-        nir_strip, _, nir_ok = normalize_strip(nir_mono, pipeline, side)
+        vis_strip, _, vis_ok = normalize_strip(vis_mono, pipeline, side, enhance=enhance, soft_fill=soft_fill)
+        nir_strip, _, nir_ok = normalize_strip(nir_mono, pipeline, side, enhance=enhance, soft_fill=soft_fill)
         seg_ok["VIS"] += int(vis_ok); seg_fail["VIS"] += int(not vis_ok)
         seg_ok["NIR"] += int(nir_ok); seg_fail["NIR"] += int(not nir_ok)
 
-        # geometry overlays (separate runs to capture call_trace geometry)
-        vis_gp = safe_trace(pipeline, "geometry_estimation") if run_pipeline(pipeline, iris, vis_mono, side) else None
-        vis_overlay = draw_overlay(vis_mono, vis_gp, f"VIS {label}")
-        nir_gp = safe_trace(pipeline, "geometry_estimation") if run_pipeline(pipeline, iris, nir_mono, side) else None
-        nir_overlay = draw_overlay(nir_mono, nir_gp, f"NIR {label}")
-        h = max(vis_overlay.shape[0], nir_overlay.shape[0])
-        pad = lambda im: cv2.copyMakeBorder(im, 0, h - im.shape[0], 0, 0, cv2.BORDER_CONSTANT)
-        cv2.imwrite(os.path.join(args.out, f"seg_{label}.png"), np.hstack([pad(vis_overlay), pad(nir_overlay)]))
+        # geometry overlays — open-iris only (uses call_trace["geometry_estimation"])
+        if args.backend == "openiris":
+            vis_gp = safe_trace(pipeline, "geometry_estimation") if run_pipeline(pipeline, iris, vis_mono, side) else None
+            vis_overlay = draw_overlay(vis_mono, vis_gp, f"VIS {label}")
+            nir_gp = safe_trace(pipeline, "geometry_estimation") if run_pipeline(pipeline, iris, nir_mono, side) else None
+            nir_overlay = draw_overlay(nir_mono, nir_gp, f"NIR {label}")
+            h = max(vis_overlay.shape[0], nir_overlay.shape[0])
+            pad = lambda im: cv2.copyMakeBorder(im, 0, h - im.shape[0], 0, 0, cv2.BORDER_CONSTANT)
+            cv2.imwrite(os.path.join(args.out, f"seg_{label}.png"), np.hstack([pad(vis_overlay), pad(nir_overlay)]))
 
         # strip alignment montage + NCC scan
         if vis_ok and nir_ok:
