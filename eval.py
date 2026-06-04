@@ -69,65 +69,80 @@ def _load_strip(path: str) -> torch.Tensor:
 @torch.no_grad()
 def evaluate(net_vis, net_nir, vis_root: str, nir_root: str, ids: list,
              device: torch.device, n_impostor_multiplier: int = 5,
-             batch_size: int = 128) -> dict:
+             batch_size: int = 128, roll_shifts=None) -> dict:
     """Embed all strips, form genuine+impostor pairs, compute EER and GARs.
 
     Args:
         net_vis / net_nir: encoder models in eval mode (called as net(strip) -> emb).
         ids:               list of identity folder names to evaluate.
         n_impostor_multiplier: sample this many impostor pairs per genuine pair.
+        roll_shifts:       optional list of angular pixel shifts to search over at match
+                           time. The VIS probe is rolled by each shift, re-embedded, and the
+                           MINIMUM distance to the NIR gallery embedding is taken — the
+                           classical iris rotation-tolerance trick. Applied symmetrically to
+                           genuine AND impostor pairs (so it is not a genuine-only advantage).
+                           None / [0] = single-shot (default, unchanged behaviour).
 
     Returns dict with keys: eer, gar_1e-2, gar_1e-3, distances, labels.
     """
     net_vis.eval()
     net_nir.eval()
 
-    def embed_all(net, root, id_list):
-        """Returns {identity: np.ndarray [N, feat_dim]}."""
+    shifts = list(roll_shifts) if roll_shifts else [0]
+
+    def embed_all(net, root, id_list, shift_list):
+        """Returns {identity: np.ndarray [N, n_shifts, feat_dim]} (L2-normalized)."""
         embs = {}
         for idd in id_list:
             paths = glob.glob(os.path.join(root, idd, "*.png"))
             if not paths:
                 continue
-            strips = torch.stack([_load_strip(p) for p in paths]).to(device)
-            # process in sub-batches to avoid OOM on large identities
-            parts = []
-            for i in range(0, len(strips), batch_size):
-                out = net(strips[i:i + batch_size])
-                # UNet returns (reconstructed_image, embedding); IrisEncoder returns embedding only
-                emb = out[1] if isinstance(out, tuple) else out
-                # L2-normalize to match training (embeddings are unit-sphere vectors)
-                emb = torch.nn.functional.normalize(emb, p=2, dim=1)
-                parts.append(emb.cpu().numpy())
-            embs[idd] = np.concatenate(parts, axis=0)
+            strips = torch.stack([_load_strip(p) for p in paths]).to(device)  # [N,1,64,512]
+            per_shift = []
+            for s in shift_list:
+                rolled = torch.roll(strips, shifts=s, dims=-1) if s != 0 else strips
+                parts = []
+                for i in range(0, len(rolled), batch_size):
+                    out = net(rolled[i:i + batch_size])
+                    # UNet returns (reconstructed_image, embedding); IrisEncoder returns embedding only
+                    emb = out[1] if isinstance(out, tuple) else out
+                    # L2-normalize to match training (embeddings are unit-sphere vectors)
+                    emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+                    parts.append(emb.cpu().numpy())
+                per_shift.append(np.concatenate(parts, axis=0))       # [N, D]
+            embs[idd] = np.stack(per_shift, axis=1)                    # [N, n_shifts, D]
         return embs
 
-    vis_embs = embed_all(net_vis, vis_root, ids)
-    nir_embs = embed_all(net_nir, nir_root, ids)
+    # Roll only the VIS probe; keep the NIR gallery fixed (relative shift is what matters).
+    vis_embs = embed_all(net_vis, vis_root, ids, shifts)
+    nir_embs = embed_all(net_nir, nir_root, ids, [0])
 
     shared_ids = [i for i in ids if i in vis_embs and i in nir_embs]
+
+    def min_dist(v, n):
+        # v: [Sv, D]  n: [Sn, D]  ->  min squared-L2 over all shift combinations
+        diff = v[:, None, :] - n[None, :, :]            # [Sv, Sn, D]
+        return float(np.min(np.sum(diff ** 2, axis=-1)))
 
     distances = []
     labels = []
 
     # ALL genuine pairs: every (VIS_i, NIR_j) for each identity
     for idd in shared_ids:
-        for v_emb in vis_embs[idd]:
-            for n_emb in nir_embs[idd]:
-                d = float(np.sum((v_emb - n_emb) ** 2))
-                distances.append(d)
+        for v_emb in vis_embs[idd]:        # [Sv, D]
+            for n_emb in nir_embs[idd]:    # [Sn, D]
+                distances.append(min_dist(v_emb, n_emb))
                 labels.append(1)
 
     n_genuine = len(distances)
 
-    # Random impostor pairs (different identity, VIS vs NIR)
+    # Random impostor pairs (different identity, VIS vs NIR) — same min-over-shifts rule
     impostor_target = n_genuine * n_impostor_multiplier
     for _ in range(impostor_target):
         ida, idb = random.sample(shared_ids, 2)
         v_emb = random.choice(vis_embs[ida])
         n_emb = random.choice(nir_embs[idb])
-        d = float(np.sum((v_emb - n_emb) ** 2))
-        distances.append(d)
+        distances.append(min_dist(v_emb, n_emb))
         labels.append(0)
 
     distances = np.array(distances, dtype=np.float32)
@@ -202,6 +217,9 @@ def main():
     ap.add_argument("--out_dir",    default="eval_results")
     ap.add_argument("--feat_dim",   type=int, default=128)
     ap.add_argument("--model_type", default="unet", choices=["unet", "encoder"])
+    ap.add_argument("--roll_max",   type=int, default=0,
+                    help="match-time angular roll search: search shifts in [-roll_max, roll_max] px. 0 = single-shot")
+    ap.add_argument("--roll_step",  type=int, default=4, help="step (px) for the roll search grid")
     args = ap.parse_args()
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -227,7 +245,10 @@ def main():
         net_vis.load_state_dict(state["net_vis"])
         net_nir.load_state_dict(state["net_nir"])
 
-    results = evaluate(net_vis, net_nir, args.vis_root, args.nir_root, ids, device)
+    roll_shifts = list(range(-args.roll_max, args.roll_max + 1, args.roll_step)) if args.roll_max > 0 else None
+    if roll_shifts:
+        print(f"Rotation search: {len(roll_shifts)} shifts {roll_shifts[0]}..{roll_shifts[-1]} px (step {args.roll_step})")
+    results = evaluate(net_vis, net_nir, args.vis_root, args.nir_root, ids, device, roll_shifts=roll_shifts)
 
     print(f"\n--- Results ({args.split} split) ---")
     print(f"  EER          : {results['eer']:.4f}  ({results['eer']*100:.2f}%)")
