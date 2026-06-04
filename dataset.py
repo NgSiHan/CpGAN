@@ -53,25 +53,44 @@ class CrossSpectralPairs(Dataset):
         # nominal epoch size = total number of VIS strips across split identities
         return sum(len(self.vis[i]) for i in self.ids)
 
-    def _load(self, path: str) -> torch.Tensor:
-        """Load a strip PNG and return a [1, 64, 512] tensor in [-1, 1]."""
+    def _load(self, path: str, shift: int = 0) -> torch.Tensor:
+        """Load a strip PNG and return a [1, 64, 512] tensor in [-1, 1].
+
+        Args:
+            shift: pre-computed angular shift (cols) to apply.  Caller is responsible
+                   for passing the *same* shift to both strips of a genuine pair so that
+                   co-registered VIS/NIR strips stay aligned after augmentation.
+                   For impostor pairs, shifts are independent (different identities,
+                   no co-registration assumption).
+        """
         img = Image.open(path).convert("L")
         t = TF.to_tensor(img)                              # [1, 64, 512] in [0, 1]
-        if self.train and random.random() < self.shift_prob:
-            # Circular shift on the angular (width) axis — simulates iris rotation.
-            # Applied independently per strip so the model learns shift invariance.
-            s = random.randint(-self.shift_pixel, self.shift_pixel)
-            t = torch.roll(t, shifts=s, dims=-1)
+        if shift != 0:
+            t = torch.roll(t, shifts=shift, dims=-1)
         return TF.normalize(t, [0.5], [0.5])               # -> [-1, 1]
+
+    def _sample_shift(self) -> int:
+        """Return a random angular shift, or 0 if augmentation is disabled/skipped."""
+        if self.train and random.random() < self.shift_prob:
+            return random.randint(-self.shift_pixel, self.shift_pixel)
+        return 0
 
     def __getitem__(self, _):
         genuine = random.random() < 0.5
         ida = random.choice(self.ids)
-        vis = self._load(random.choice(self.vis[ida]))
+
         if genuine:
-            nir = self._load(random.choice(self.nir[ida]))
+            # Co-registered genuine pair: apply the SAME shift to VIS and NIR so the
+            # geometric alignment that PolyU gives us for free is preserved after aug.
+            shift = self._sample_shift()
+            vis = self._load(random.choice(self.vis[ida]), shift=shift)
+            nir = self._load(random.choice(self.nir[ida]), shift=shift)
         else:
+            # Impostor pair: different identities, no co-registration constraint —
+            # independent shifts are fine and add extra diversity.
+            vis = self._load(random.choice(self.vis[ida]), shift=self._sample_shift())
             idb = random.choice([i for i in self.ids if i != ida])
-            nir = self._load(random.choice(self.nir[idb]))
+            nir = self._load(random.choice(self.nir[idb]), shift=self._sample_shift())
+
         label = torch.tensor(1.0 if genuine else 0.0)
         return vis, nir, label
