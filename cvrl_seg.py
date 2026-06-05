@@ -188,7 +188,10 @@ class CVRLSegmenter:
         self.min_pupil_r = min_pupil_r
         self.min_iris_r = min_iris_r
 
-        with torch.inference_mode():
+        # NB: load under no_grad (NOT inference_mode) so the weights are normal tensors.
+        # inference_mode-created tensors poison any later autograd-tracked call (e.g. when the
+        # diagnostic invokes the inner methods directly). We freeze params instead.
+        with torch.no_grad():
             self.circle_model = models.resnet18()
             self.circle_model.avgpool = conv(in_channels=512, out_n=6)
             self.circle_model.fc = fclayer(out_n=6)
@@ -198,6 +201,8 @@ class CVRLSegmenter:
             self.mask_model = NestedSharedAtrousResUNet(1, 1, width=32, resolution=(240, 320))
             self.mask_model.load_state_dict(torch.load(mask_model_path, map_location=self.device))
             self.mask_model = self.mask_model.float().to(self.device).eval()
+        for p in list(self.circle_model.parameters()) + list(self.mask_model.parameters()):
+            p.requires_grad_(False)
 
         self._tf = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
 
