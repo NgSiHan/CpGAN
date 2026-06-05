@@ -69,7 +69,8 @@ def _load_strip(path: str) -> torch.Tensor:
 @torch.no_grad()
 def evaluate(net_vis, net_nir, vis_root: str, nir_root: str, ids: list,
              device: torch.device, n_impostor_multiplier: int = 5,
-             batch_size: int = 128, roll_shifts=None, gallery_fusion: str = "none") -> dict:
+             batch_size: int = 128, roll_shifts=None, gallery_fusion: str = "none",
+             adabn: bool = False) -> dict:
     """Embed all strips, form genuine+impostor pairs, compute EER and GARs.
 
     Args:
@@ -87,6 +88,35 @@ def evaluate(net_vis, net_nir, vis_root: str, nir_root: str, ids: list,
     """
     net_vis.eval()
     net_nir.eval()
+
+    # AdaBN (transductive domain adaptation, NO labels): recompute BatchNorm running
+    # mean/var on the TARGET-domain strips so PolyU-learned BN stats don't mis-normalize
+    # a different sensor's images. Uses unlabeled target inputs only — declare it when reporting.
+    def refresh_bn(net, root, id_list):
+        import torch.nn as nn
+        bns = [m for m in net.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)]
+        if not bns:
+            return 0
+        for m in bns:
+            m.reset_running_stats()
+            m.momentum = None          # cumulative average -> exact target-set mean/var
+            m.train()
+        with torch.no_grad():
+            for idd in id_list:
+                paths = glob.glob(os.path.join(root, idd, "*.png"))
+                if not paths:
+                    continue
+                strips = torch.stack([_load_strip(p) for p in paths]).to(device)
+                for i in range(0, len(strips), batch_size):
+                    net(strips[i:i + batch_size])
+        for m in bns:
+            m.eval()
+        return len(bns)
+
+    if adabn:
+        nv = refresh_bn(net_vis, vis_root, ids)
+        nn_ = refresh_bn(net_nir, nir_root, ids)
+        print(f"AdaBN: refreshed BN stats on target domain (vis {nv} / nir {nn_} BN layers)")
 
     shifts = list(roll_shifts) if roll_shifts else [0]
 
@@ -231,6 +261,8 @@ def main():
     ap.add_argument("--roll_step",  type=int, default=4, help="step (px) for the roll search grid")
     ap.add_argument("--gallery_fusion", default="none", choices=["none", "mean"],
                     help="mean = average each identity's NIR embeddings into one enrolled template")
+    ap.add_argument("--adabn", action="store_true",
+                    help="recompute BatchNorm stats on the target domain (transductive, no labels)")
     args = ap.parse_args()
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -262,7 +294,7 @@ def main():
     if args.gallery_fusion != "none":
         print(f"Gallery fusion: {args.gallery_fusion} (NIR enrolled as one template per identity)")
     results = evaluate(net_vis, net_nir, args.vis_root, args.nir_root, ids, device,
-                       roll_shifts=roll_shifts, gallery_fusion=args.gallery_fusion)
+                       roll_shifts=roll_shifts, gallery_fusion=args.gallery_fusion, adabn=args.adabn)
 
     print(f"\n--- Results ({args.split} split) ---")
     print(f"  EER          : {results['eer']:.4f}  ({results['eer']*100:.2f}%)")
