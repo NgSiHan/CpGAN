@@ -36,7 +36,8 @@ class CrossSpectralPairs(Dataset):
     """
 
     def __init__(self, vis_root: str, nir_root: str, ids: list,
-                 train: bool = True, shift_pixel: int = 14, shift_prob: float = 0.5):
+                 train: bool = True, shift_pixel: int = 14, shift_prob: float = 0.5,
+                 independent_roll: bool = False):
         self.vis = _index(vis_root)
         self.nir = _index(nir_root)
         # only keep identities that have strips in BOTH spectra and belong to this split
@@ -48,6 +49,12 @@ class CrossSpectralPairs(Dataset):
         self.train = train
         self.shift_pixel = shift_pixel
         self.shift_prob = shift_prob
+        # False (default): co-registered data (PolyU) -> roll a genuine pair JOINTLY to keep
+        #   the simultaneously-captured alignment.
+        # True: non-co-registered data (CUVIRIS, captured at different times/devices) -> roll
+        #   genuine pairs INDEPENDENTLY to learn rotation-invariance, since no shared
+        #   alignment exists to preserve.
+        self.independent_roll = independent_roll
 
     def __len__(self) -> int:
         # nominal epoch size = total number of VIS strips across split identities
@@ -80,11 +87,15 @@ class CrossSpectralPairs(Dataset):
         ida = random.choice(self.ids)
 
         if genuine:
-            # Co-registered genuine pair: apply the SAME shift to VIS and NIR so the
-            # geometric alignment that PolyU gives us for free is preserved after aug.
-            shift = self._sample_shift()
-            vis = self._load(random.choice(self.vis[ida]), shift=shift)
-            nir = self._load(random.choice(self.nir[ida]), shift=shift)
+            if self.independent_roll:
+                # Non-co-registered genuine pair (CUVIRIS): independent shifts -> rotation-invariance.
+                vis = self._load(random.choice(self.vis[ida]), shift=self._sample_shift())
+                nir = self._load(random.choice(self.nir[ida]), shift=self._sample_shift())
+            else:
+                # Co-registered genuine pair (PolyU): SAME shift to preserve the alignment.
+                shift = self._sample_shift()
+                vis = self._load(random.choice(self.vis[ida]), shift=shift)
+                nir = self._load(random.choice(self.nir[ida]), shift=shift)
         else:
             # Impostor pair: different identities, no co-registration constraint —
             # independent shifts are fine and add extra diversity.

@@ -210,6 +210,8 @@ def main():
     ap.add_argument("--eval_every",  type=int,   default=5)
     ap.add_argument("--shift_pixel", type=int,   default=14)
     ap.add_argument("--shift_prob",  type=float, default=0.5)
+    ap.add_argument("--independent_roll", action="store_true",
+                    help="roll genuine pairs independently (non-co-registered data, e.g. CUVIRIS fine-tune)")
     ap.add_argument("--save_dir",    default="checkpoints/cpgan")
     ap.add_argument("--reset_optimizer", action="store_true",
                     help="Reset optimizer/LR to args.lr instead of restoring from checkpoint. "
@@ -228,7 +230,8 @@ def main():
 
     train_ds = CrossSpectralPairs(
         args.vis_root, args.nir_root, splits["train"], train=True,
-        shift_pixel=args.shift_pixel, shift_prob=args.shift_prob)
+        shift_pixel=args.shift_pixel, shift_prob=args.shift_prob,
+        independent_roll=args.independent_roll)
     val_ids = splits["val"]
 
     train_loader = DataLoader(
@@ -270,13 +273,18 @@ def main():
             disc_nir.load_state_dict(state["disc_nir"])
         if args.reset_optimizer:
             print("  --reset_optimizer: starting fresh LR (optimizer state from checkpoint ignored)")
+            # Fresh run (e.g. fine-tuning on a DIFFERENT dataset/val split): the checkpoint's
+            # val_eer is from another split and must NOT gate saving here, or the best
+            # checkpoint never gets written. Reset the epoch counter and best_eer.
+            start_epoch = 1
+            best_eer = 1.0
         else:
             if "optimizer_G" in state:
                 optimizer_G.load_state_dict(state["optimizer_G"])
             if "optimizer_D" in state:
                 optimizer_D.load_state_dict(state["optimizer_D"])
-        start_epoch = state.get("epoch", 0) + 1
-        best_eer    = state.get("val_eer", 1.0)
+            start_epoch = state.get("epoch", 0) + 1
+            best_eer    = state.get("val_eer", 1.0)
         print(f"  Resuming from epoch {start_epoch}, best EER so far: {best_eer:.4f}")
 
     adversarial_loss = torch.nn.MSELoss().to(device)
