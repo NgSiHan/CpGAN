@@ -69,7 +69,7 @@ def _load_strip(path: str) -> torch.Tensor:
 @torch.no_grad()
 def evaluate(net_vis, net_nir, vis_root: str, nir_root: str, ids: list,
              device: torch.device, n_impostor_multiplier: int = 5,
-             batch_size: int = 128, roll_shifts=None) -> dict:
+             batch_size: int = 128, roll_shifts=None, gallery_fusion: str = "none") -> dict:
     """Embed all strips, form genuine+impostor pairs, compute EER and GARs.
 
     Args:
@@ -116,6 +116,15 @@ def evaluate(net_vis, net_nir, vis_root: str, nir_root: str, ids: list,
     # Roll only the VIS probe; keep the NIR gallery fixed (relative shift is what matters).
     vis_embs = embed_all(net_vis, vis_root, ids, shifts)
     nir_embs = embed_all(net_nir, nir_root, ids, [0])
+
+    # Gallery template fusion: enroll multiple NIR captures -> one averaged template per
+    # identity (deployment-realistic, and denoises per-instance variation). "mean" usually
+    # the biggest single EER lever; "none" = match against every individual NIR instance.
+    if gallery_fusion == "mean":
+        for idd in list(nir_embs.keys()):
+            t = nir_embs[idd].mean(axis=0, keepdims=True)            # [1, S, D]
+            t = t / (np.linalg.norm(t, axis=-1, keepdims=True) + 1e-9)
+            nir_embs[idd] = t.astype(np.float32)
 
     shared_ids = [i for i in ids if i in vis_embs and i in nir_embs]
 
@@ -220,6 +229,8 @@ def main():
     ap.add_argument("--roll_max",   type=int, default=0,
                     help="match-time angular roll search: search shifts in [-roll_max, roll_max] px. 0 = single-shot")
     ap.add_argument("--roll_step",  type=int, default=4, help="step (px) for the roll search grid")
+    ap.add_argument("--gallery_fusion", default="none", choices=["none", "mean"],
+                    help="mean = average each identity's NIR embeddings into one enrolled template")
     args = ap.parse_args()
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -248,7 +259,10 @@ def main():
     roll_shifts = list(range(-args.roll_max, args.roll_max + 1, args.roll_step)) if args.roll_max > 0 else None
     if roll_shifts:
         print(f"Rotation search: {len(roll_shifts)} shifts {roll_shifts[0]}..{roll_shifts[-1]} px (step {args.roll_step})")
-    results = evaluate(net_vis, net_nir, args.vis_root, args.nir_root, ids, device, roll_shifts=roll_shifts)
+    if args.gallery_fusion != "none":
+        print(f"Gallery fusion: {args.gallery_fusion} (NIR enrolled as one template per identity)")
+    results = evaluate(net_vis, net_nir, args.vis_root, args.nir_root, ids, device,
+                       roll_shifts=roll_shifts, gallery_fusion=args.gallery_fusion)
 
     print(f"\n--- Results ({args.split} split) ---")
     print(f"  EER          : {results['eer']:.4f}  ({results['eer']*100:.2f}%)")
