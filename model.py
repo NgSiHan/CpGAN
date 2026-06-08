@@ -46,6 +46,135 @@ class IrisEncoder(nn.Module):
         return self.fc1(e.view(bs, -1))
 
 
+class ResNetIrisEncoder(nn.Module):
+    """ResNet-18 backbone for 1-channel 64x512 iris strips.
+
+    Spatial progression:
+      Input  [B, 1, 64, 512]
+      conv1  [B, 64, 32, 256]   (7x7 stride-2, pad 3)
+      maxpool [B, 64, 16, 128]  (3x3 stride-2, pad 1)
+      layer1 [B, 64, 16, 128]   (no stride)
+      layer2 [B, 128, 8, 64]    (stride-2)
+      layer3 [B, 256, 4, 32]    (stride-2)
+      layer4 [B, 512, 2, 16]    (stride-2)
+      adaptive_avgpool(1,1) -> [B, 512, 1, 1]
+      flatten -> [B, 512]
+      bn_neck + fc -> [B, feat_dim]
+
+    Output is NOT L2-normalised. Callers normalise as needed:
+      - ArcFaceHead normalises internally.
+      - Cross-modal contrastive callers must F.normalize before computing distances.
+    """
+
+    def __init__(self, feat_dim: int = 512):
+        super().__init__()
+        backbone = models.resnet18(weights=None)   # train from scratch; no 1-ch pretrained
+
+        # Replace first conv: 3-channel -> 1-channel, keep geometry identical
+        backbone.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+
+        # Expose ResNet blocks individually (clean state_dict key names)
+        self.conv1   = backbone.conv1
+        self.bn1     = backbone.bn1
+        self.relu    = backbone.relu
+        self.maxpool = backbone.maxpool
+        self.layer1  = backbone.layer1
+        self.layer2  = backbone.layer2
+        self.layer3  = backbone.layer3
+        self.layer4  = backbone.layer4
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Embedding head: BN before fc stabilises ArcFace cosine margin computation
+        self.bn_neck = nn.BatchNorm1d(512)
+        self.fc      = nn.Linear(512, feat_dim, bias=False)   # bias=False: standard for ArcFace
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, 1, 64, 512]
+        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)   # [B, 512]
+        x = self.bn_neck(x)
+        return self.fc(x)          # [B, feat_dim]
+
+
+class ArcFaceHead(nn.Module):
+    """Additive Angular Margin Loss head (ArcFace, Deng et al. CVPR 2019).
+
+    Weight matrix W is [n_cls, feat_dim]; columns L2-normalised at each forward pass
+    so the logit for class c is cos(theta_c) = feat_norm . W_norm_c.
+
+    The margin m is added to theta for the ground-truth class before re-scaling
+    by s and passing to cross-entropy:
+        logit_gt = s * cos(theta_gt + m)
+        logit_j  = s * cos(theta_j)     for j != gt
+
+    Shared between net_vis and net_nir: same W forces both modalities to cluster
+    toward the same identity-discriminative directions, providing the cross-spectral
+    alignment signal without needing explicit cross-modal contrastive alone.
+
+    Args:
+        feat_dim: embedding dimensionality (must match ResNetIrisEncoder.feat_dim)
+        n_cls:    number of training identities
+        s:        scale (default 64.0, standard for 512-d embeddings)
+        m:        angular margin in radians (default 0.5 ~= 28.6 deg)
+    """
+
+    def __init__(self, feat_dim: int = 512, n_cls: int = 292,
+                 s: float = 64.0, m: float = 0.5):
+        super().__init__()
+        self.s = s
+        self.m = m
+        self.weight = nn.Parameter(torch.empty(n_cls, feat_dim))
+        nn.init.xavier_uniform_(self.weight)
+
+        # Precompute margin trig values (constant for fixed m)
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        # Stability threshold: cos(pi - m).  Below this, cos(theta+m) would wrap past
+        # 180 deg and its gradient would flip sign, causing hard samples to be pushed
+        # the wrong way.  Use linear fallback: cos(theta) - sin(pi-m)*m instead.
+        self.th = math.cos(math.pi - m)
+        self.mm = math.sin(math.pi - m) * m
+
+    def forward(self, feat: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            feat:   [B, feat_dim]  raw (un-normalised) embedding from ResNetIrisEncoder
+            labels: [B]            integer class indices in [0, n_cls), dtype=torch.long
+        Returns:
+            scalar cross-entropy loss
+        """
+        # Normalise feature and weight columns to unit sphere
+        feat_n = F.normalize(feat.float(), p=2, dim=1)          # [B, D]  (float32 for trig stability)
+        W_n    = F.normalize(self.weight.float(), p=2, dim=1)   # [n_cls, D]
+
+        cos_theta = feat_n @ W_n.t()                             # [B, n_cls]
+        cos_theta = cos_theta.clamp(-1 + 1e-7, 1 - 1e-7)        # guard for acos
+        sin_theta = torch.sqrt(1.0 - cos_theta ** 2)
+
+        # cos(theta + m) = cos*cos_m - sin*sin_m
+        cos_theta_m = cos_theta * self.cos_m - sin_theta * self.sin_m
+
+        # Apply linear fallback for numerical stability when cos_theta < threshold
+        cos_theta_m = torch.where(
+            cos_theta > self.th,
+            cos_theta_m,
+            cos_theta - self.mm,
+        )
+
+        # Replace logit at ground-truth positions with margin-perturbed value
+        one_hot = torch.zeros_like(cos_theta)
+        one_hot.scatter_(1, labels.view(-1, 1), 1.0)
+        logits = one_hot * cos_theta_m + (1.0 - one_hot) * cos_theta
+        logits = logits * self.s
+
+        return F.cross_entropy(logits, labels)
+
+
 class UNet(nn.Module):
     # initializers
     def __init__(self, d=64, feat_dim=128):

@@ -318,7 +318,7 @@ def main():
         loss_c_m    = AverageMeter()
         loss_perc_m = AverageMeter()
 
-        for vis, nir, lbl in train_loader:
+        for vis, nir, lbl, *_ in train_loader:
             bs = vis.size(0)
             vis, nir, lbl = vis.to(device), nir.to(device), lbl.to(device)
 

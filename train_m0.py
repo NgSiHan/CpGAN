@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader
 
 from dataset import CrossSpectralPairs
 from eval import evaluate, plot_results
-from model import IrisEncoder
+from model import IrisEncoder, ResNetIrisEncoder
 from utils import AverageMeter
 
 
@@ -48,7 +48,11 @@ def main():
     ap.add_argument("--batch_size", type=int,   default=256)
     ap.add_argument("--margin",     type=float, default=2.0)
     ap.add_argument("--lr",         type=float, default=2e-4)
-    ap.add_argument("--feat_dim",   type=int,   default=128)
+    ap.add_argument("--feat_dim",    type=int,   default=128)
+    ap.add_argument("--model_type",  default="conv", choices=["conv", "resnet"],
+                    help="conv: original IrisEncoder (6-conv, 128-d default). "
+                         "resnet: ResNetIrisEncoder (ResNet-18, 512-d default). "
+                         "Pass --feat_dim 512 --lr 1e-4 with resnet.")
     ap.add_argument("--workers",    type=int,   default=8)
     ap.add_argument("--eval_every", type=int,   default=2, help="eval on val every N epochs")
     ap.add_argument("--save_dir",   default="checkpoints/m0")
@@ -71,8 +75,14 @@ def main():
         train_ds, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True, drop_last=True)
 
-    net_vis = IrisEncoder(feat_dim=args.feat_dim).to(device)
-    net_nir = IrisEncoder(feat_dim=args.feat_dim).to(device)
+    if args.model_type == "resnet":
+        net_vis = ResNetIrisEncoder(feat_dim=args.feat_dim).to(device)
+        net_nir = ResNetIrisEncoder(feat_dim=args.feat_dim).to(device)
+        print(f"Using ResNetIrisEncoder (feat_dim={args.feat_dim})")
+    else:
+        net_vis = IrisEncoder(feat_dim=args.feat_dim).to(device)
+        net_nir = IrisEncoder(feat_dim=args.feat_dim).to(device)
+        print(f"Using IrisEncoder (feat_dim={args.feat_dim})")
 
     optimizer = torch.optim.Adam(
         list(net_vis.parameters()) + list(net_nir.parameters()),
@@ -92,7 +102,7 @@ def main():
         gen_dist = AverageMeter()
         imp_dist = AverageMeter()
 
-        for vis, nir, lbl in train_loader:
+        for vis, nir, lbl, *_ in train_loader:
             vis, nir, lbl = vis.to(device), nir.to(device), lbl.to(device)
 
             emb_vis = F.normalize(net_vis(vis), p=2, dim=1)
@@ -132,13 +142,14 @@ def main():
                 best_eer = eer
                 ckpt_path = Path(args.save_dir) / "best.pt"
                 torch.save({
-                    "epoch": epoch,
-                    "net_vis": net_vis.state_dict(),
-                    "net_nir": net_nir.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "val_eer": eer,
-                    "margin": args.margin,
-                    "feat_dim": args.feat_dim,
+                    "epoch":      epoch,
+                    "net_vis":    net_vis.state_dict(),
+                    "net_nir":    net_nir.state_dict(),
+                    "optimizer":  optimizer.state_dict(),
+                    "val_eer":    eer,
+                    "margin":     args.margin,
+                    "feat_dim":   args.feat_dim,
+                    "model_type": args.model_type,
                 }, ckpt_path)
                 print(f"  -> saved best checkpoint  (EER={best_eer:.4f})")
 

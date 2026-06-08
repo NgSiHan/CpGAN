@@ -49,6 +49,8 @@ class CrossSpectralPairs(Dataset):
         self.train = train
         self.shift_pixel = shift_pixel
         self.shift_prob = shift_prob
+        # Stable integer index for each identity (used by ArcFaceHead label input)
+        self.id_to_idx: dict = {idd: i for i, idd in enumerate(self.ids)}
         # False (default): co-registered data (PolyU) -> roll a genuine pair JOINTLY to keep
         #   the simultaneously-captured alignment.
         # True: non-co-registered data (CUVIRIS, captured at different times/devices) -> roll
@@ -87,6 +89,7 @@ class CrossSpectralPairs(Dataset):
         ida = random.choice(self.ids)
 
         if genuine:
+            idb = ida   # set here so nir_id_idx can be computed uniformly below
             if self.independent_roll:
                 # Non-co-registered genuine pair (CUVIRIS): independent shifts -> rotation-invariance.
                 vis = self._load(random.choice(self.vis[ida]), shift=self._sample_shift())
@@ -103,5 +106,7 @@ class CrossSpectralPairs(Dataset):
             idb = random.choice([i for i in self.ids if i != ida])
             nir = self._load(random.choice(self.nir[idb]), shift=self._sample_shift())
 
-        label = torch.tensor(1.0 if genuine else 0.0)
-        return vis, nir, label
+        label      = torch.tensor(1.0 if genuine else 0.0)
+        vis_id_idx = torch.tensor(self.id_to_idx[ida], dtype=torch.long)
+        nir_id_idx = torch.tensor(self.id_to_idx[idb], dtype=torch.long)
+        return vis, nir, label, vis_id_idx, nir_id_idx

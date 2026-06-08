@@ -255,7 +255,7 @@ def main():
     ap.add_argument("--split",      default="test", choices=["train", "val", "test"])
     ap.add_argument("--out_dir",    default="eval_results")
     ap.add_argument("--feat_dim",   type=int, default=128)
-    ap.add_argument("--model_type", default="unet", choices=["unet", "encoder"])
+    ap.add_argument("--model_type", default="unet", choices=["unet", "encoder", "resnet"])
     ap.add_argument("--roll_max",   type=int, default=0,
                     help="match-time angular roll search: search shifts in [-roll_max, roll_max] px. 0 = single-shot")
     ap.add_argument("--roll_step",  type=int, default=4, help="step (px) for the roll search grid")
@@ -279,6 +279,15 @@ def main():
         from model import IrisEncoder
         net_vis = IrisEncoder(feat_dim=args.feat_dim).to(device)
         net_nir = IrisEncoder(feat_dim=args.feat_dim).to(device)
+        net_vis.load_state_dict(state["net_vis"])
+        net_nir.load_state_dict(state["net_nir"])
+    elif args.model_type == "resnet":
+        from model import ResNetIrisEncoder
+        feat_dim = state.get("feat_dim", args.feat_dim)
+        if feat_dim != args.feat_dim:
+            print(f"NOTE: checkpoint feat_dim={feat_dim} overrides --feat_dim {args.feat_dim}")
+        net_vis = ResNetIrisEncoder(feat_dim=feat_dim).to(device)
+        net_nir = ResNetIrisEncoder(feat_dim=feat_dim).to(device)
         net_vis.load_state_dict(state["net_vis"])
         net_nir.load_state_dict(state["net_nir"])
     else:
