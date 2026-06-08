@@ -111,14 +111,22 @@ def main():
                     help="disable background-subtract + CLAHE (enhance_strip)")
     ap.add_argument("--no_soft_fill", action="store_true",
                     help="disable mask soft-fill (recommended to try: can hurt cross-spectral matching)")
+    ap.add_argument("--pre_normalized", action="store_true",
+                    help="input is ALREADY normalized iris strips (e.g. PolyU Cross-Norm). Skips "
+                         "segmentation/CVRL entirely: just load grayscale, resize to 64x512, save.")
     args = ap.parse_args()
 
-    pipeline = build_segmenter(args.backend, device=args.device,
-                               mask_model_path=args.mask_model,
-                               circle_model_path=args.circle_model)
-    enhance = not args.no_enhance
-    soft_fill = not args.no_soft_fill
-    print(f"backend={args.backend}  enhance={enhance}  soft_fill={soft_fill}")
+    import cv2
+    if args.pre_normalized:
+        pipeline = None
+        print(f"pre_normalized=True  (no segmentation; load grayscale + resize to {STRIP_W}x{STRIP_H})")
+    else:
+        pipeline = build_segmenter(args.backend, device=args.device,
+                                   mask_model_path=args.mask_model,
+                                   circle_model_path=args.circle_model)
+        enhance = not args.no_enhance
+        soft_fill = not args.no_soft_fill
+        print(f"backend={args.backend}  enhance={enhance}  soft_fill={soft_fill}")
 
     src_root, dst_root = Path(args.src), Path(args.dst)
     files = [f for f in src_root.rglob("*") if f.suffix.lower() in IMG_EXTS]
@@ -131,22 +139,28 @@ def main():
             parse_fail += 1
             continue
         subject, eye, modality, eye_side = meta
-        try:
-            mono = to_mono(path, modality)
-        except IOError:
-            read_fail += 1
-            continue
-
-        strip, mask, success = normalize_strip(mono, pipeline, eye_side,
-                                               enhance=enhance, soft_fill=soft_fill)
-        if not success:
-            seg_fail += 1
-            continue
+        if args.pre_normalized:
+            # already-normalized strip: load grayscale, resize to fixed geometry, done.
+            img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                read_fail += 1
+                continue
+            strip = cv2.resize(img, (STRIP_W, STRIP_H), interpolation=cv2.INTER_LINEAR)
+        else:
+            try:
+                mono = to_mono(path, modality)
+            except IOError:
+                read_fail += 1
+                continue
+            strip, mask, success = normalize_strip(mono, pipeline, eye_side,
+                                                   enhance=enhance, soft_fill=soft_fill)
+            if not success:
+                seg_fail += 1
+                continue
 
         # save: <dst>/<MODALITY>/<subject>_<eye>/<stem>.png
         out_dir = dst_root / modality / f"{subject}_{eye}"
         out_dir.mkdir(parents=True, exist_ok=True)
-        import cv2
         cv2.imwrite(str(out_dir / f"{path.stem}.png"), strip)
         ok += 1
 
