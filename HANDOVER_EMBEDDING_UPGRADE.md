@@ -1,5 +1,13 @@
 # Handover — CpGAN shared-embedding cross-spectral iris, next phase
 
+> **STATUS (2026-07-19): architecture investigation COMPLETE — bottleneck is DATA, not model.**
+> Phases 0–3 all ran. The tiny 6-conv contrastive champion (**PolyU test EER 0.1248**) is unbeaten by
+> every architecture lever tried: ResNet+ArcFace (0.307), shared/tied encoder (0.385), UBIRIS-pretrained
+> ResNet+contrastive (0.1443). **Weight-tying and big encoders do not help — §3's premise is refuted.**
+> Real-world CUVIRIS 5-fold = **0.3172 ± 2.45%, GAR@1e-3≈0** (not deployable at strict FAR). The only
+> lever left is MORE paired VIS-NIR data. Next experiment: add PolyU Session 2 identities (§5a) and test
+> whether EER moves. STOP tuning architecture. Champion `best.pt` is the model to carry forward.
+
 **Read this first. This repo is the `Coupled-GAN` (CpGAN) cross-spectral iris matcher.**
 The goal: match a **VIS (visible, phone) probe** against an **NIR (near-infrared, scanner) gallery**
 by embedding both spectra into one shared vector space and comparing by distance — **not** by
@@ -65,7 +73,10 @@ Two ways to do VIS↔NIR matching:
 | **ResNet-18 + ArcFace** (`train_arcface.py`) | PolyU | **0.307** | **regressed — alignment bug (§3)** |
 | CpGAN zero-shot | CUVIRIS | 0.44 | pure sensor-domain gap |
 | CpGAN fine-tuned, single split | CUVIRIS | 0.31 | lucky split |
-| CpGAN fine-tuned, honest 5-fold | CUVIRIS | **0.397 ± 3.5%**, GAR@1e-3=0 | **the real number; data-bound** |
+| CpGAN fine-tuned, honest 5-fold | CUVIRIS | 0.397 ± 3.5% | superseded — see reconfirm below |
+| **Shared/tied encoder (Lever 1)** | PolyU | **0.385** | 2026-07-19: tying HURTS — refutes §3 |
+| **UBIRIS-pretrained ResNet + contrastive (Phase 2)** | PolyU | **0.1443** | 2026-07-19: still loses to champion 0.1248 |
+| **CpGAN 5-fold, reconfirmed (rebuilt harness)** | CUVIRIS | **0.3172 ± 2.45%**, GAR@1e-3≈0 | 2026-07-19: current honest number |
 
 **Two conclusions carried forward:**
 1. **0.121 is a *data* ceiling on PolyU** (292 train identities), not obviously an architecture ceiling —

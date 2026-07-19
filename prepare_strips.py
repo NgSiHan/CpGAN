@@ -77,6 +77,21 @@ def parse_meta(path: Path, dataset: str):
             return None
         return m.group(1), "E", "VIS", "left"
 
+    if dataset == "utiris":
+        # UTIRIS_GAN layout: <VIS|NIR>/<subj>_<L|R>/<subj>_<L|R>_<n>.png — full-eye RGB, CVRL-segmentable.
+        # Identity = the "<digits>_<L|R>" parent folder. This collides with PolyU naming (001_L etc.),
+        # so merge into a PolyU strips root with --id_prefix ut_.
+        import re
+        low = [p.lower() for p in path.parts]
+        modality = "VIS" if "vis" in low else ("NIR" if "nir" in low else None)
+        if modality is None:
+            return None
+        m = re.match(r"(\d+)_([LlRr])$", path.parent.name)
+        if m is None:
+            return None
+        eye = m.group(2).upper()
+        return m.group(1), eye, modality, ("left" if eye == "L" else "right")
+
     low = [p.lower() for p in path.parts]
 
     # --- modality: from a path component, else fall back to extension (CUVIRIS NIR = .bmp)
@@ -110,7 +125,12 @@ def main():
     ap = argparse.ArgumentParser(description="RAW iris -> 64x512 normalized strips")
     ap.add_argument("--src", required=True, help="root folder of RAW images (searched recursively)")
     ap.add_argument("--dst", required=True, help="output root for strips")
-    ap.add_argument("--dataset", default="polyu", choices=["polyu", "cuviris", "ubiris"])
+    ap.add_argument("--dataset", default="polyu", choices=["polyu", "cuviris", "ubiris", "utiris"])
+    ap.add_argument("--id_prefix", default="",
+                    help="Prefix prepended to every identity folder name, e.g. 's2_' to keep "
+                         "PolyU Session-2 identities distinct from Session-1 when merging into one "
+                         "strips root. USE ONLY when the subject numbers are reused across sessions "
+                         "for DIFFERENT people; leave empty if the same numbering means the same eyes.")
     # --- segmentation backend ---
     ap.add_argument("--backend", default="cvrl", choices=["cvrl", "openiris"],
                     help="cvrl = Notre Dame VIS-capable segmenter (default); openiris = Worldcoin NIR-only")
@@ -171,8 +191,8 @@ def main():
                 seg_fail += 1
                 continue
 
-        # save: <dst>/<MODALITY>/<subject>_<eye>/<stem>.png
-        out_dir = dst_root / modality / f"{subject}_{eye}"
+        # save: <dst>/<MODALITY>/<id_prefix><subject>_<eye>/<stem>.png
+        out_dir = dst_root / modality / f"{args.id_prefix}{subject}_{eye}"
         out_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out_dir / f"{path.stem}.png"), strip)
         ok += 1
