@@ -53,6 +53,9 @@ def main():
                     help="conv: original IrisEncoder (6-conv, 128-d default). "
                          "resnet: ResNetIrisEncoder (ResNet-18, 512-d default). "
                          "Pass --feat_dim 512 --lr 1e-4 with resnet.")
+    ap.add_argument("--shared_encoder", action="store_true",
+                    help="Tie VIS and NIR into ONE encoder (true Siamese). One shared "
+                         "embedding space by construction (HANDOVER §3).")
     ap.add_argument("--workers",    type=int,   default=8)
     ap.add_argument("--eval_every", type=int,   default=2, help="eval on val every N epochs")
     ap.add_argument("--save_dir",   default="checkpoints/m0")
@@ -75,18 +78,19 @@ def main():
         train_ds, batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True, drop_last=True)
 
-    if args.model_type == "resnet":
-        net_vis = ResNetIrisEncoder(feat_dim=args.feat_dim).to(device)
-        net_nir = ResNetIrisEncoder(feat_dim=args.feat_dim).to(device)
-        print(f"Using ResNetIrisEncoder (feat_dim={args.feat_dim})")
+    Enc = ResNetIrisEncoder if args.model_type == "resnet" else IrisEncoder
+    net_vis = Enc(feat_dim=args.feat_dim).to(device)
+    if args.shared_encoder:
+        net_nir = net_vis          # same object -> one shared space by construction
+        print(f"Using {Enc.__name__} (feat_dim={args.feat_dim}) — SHARED (tied) encoder")
     else:
-        net_vis = IrisEncoder(feat_dim=args.feat_dim).to(device)
-        net_nir = IrisEncoder(feat_dim=args.feat_dim).to(device)
-        print(f"Using IrisEncoder (feat_dim={args.feat_dim})")
+        net_nir = Enc(feat_dim=args.feat_dim).to(device)
+        print(f"Using {Enc.__name__} (feat_dim={args.feat_dim})")
 
-    optimizer = torch.optim.Adam(
-        list(net_vis.parameters()) + list(net_nir.parameters()),
-        lr=args.lr, betas=(0.5, 0.999))
+    # Shared: net_nir IS net_vis — list params once to avoid double-stepping in Adam.
+    enc_params = list(net_vis.parameters()) if args.shared_encoder \
+        else list(net_vis.parameters()) + list(net_nir.parameters())
+    optimizer = torch.optim.Adam(enc_params, lr=args.lr, betas=(0.5, 0.999))
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs)
@@ -150,6 +154,7 @@ def main():
                     "margin":     args.margin,
                     "feat_dim":   args.feat_dim,
                     "model_type": args.model_type,
+                    "shared_encoder": args.shared_encoder,
                 }, ckpt_path)
                 print(f"  -> saved best checkpoint  (EER={best_eer:.4f})")
 

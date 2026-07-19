@@ -214,11 +214,38 @@ ls /tmp/smoke_test/VIS/001_L/
 ```
 
 ### 4.2 Batch-run PolyU (inside tmux)
+
+**Segmentation backend (default = `cvrl`).** We now use the Notre Dame CVRL segmenter
+(`cvrl_seg.py`) instead of open-iris. It is VIS-capable (its training corpus includes UBIRIS v2)
+and emits the 64×512 polar strip + mask natively. open-iris (NIR-only, ~33% VIS failures) is
+still selectable via `--backend openiris` for A/B comparison.
+
+**Weights** — download the two `.pth` from the Notre Dame Box link
+(`OpenSourceIrisRecognition/methods/HDBIF/Python/models/readme.txt`) and place them in the repo
+root (already done on this box):
+- `nestedsharedatrousresunet-*-maskIoU-*.pth` (mask UNet++)
+- `resnet18-*-maskIoU-*.pth` (circle ResNet18)
+
 ```bash
+# CVRL backend (default). Pass weight paths if names differ from the argparse defaults.
 python prepare_strips.py \
     --src ~/PolyU_raw \
-    --dst ~/PolyU_strips
-# Watch seg_fail counts — expect more failures on VIS than NIR
+    --dst ~/PolyU_strips \
+    --backend cvrl \
+    --mask_model nestedsharedatrousresunet-006-0.028214-maskIoU-0.938446.pth \
+    --circle_model resnet18-027-0.008222-maskIoU-0.967159.pth
+# Watch seg_fail counts — should be MUCH lower on VIS than the open-iris run was.
+```
+
+**Post-processing ablation (answering "is CLAHE/soft-fill helping?").** Both steps are applied
+per-strip and can inject modality-asymmetric differences that hurt cross-spectral matching —
+soft-fill especially, since it depends on the mask and the VIS/NIR masks of a genuine pair differ.
+Build the variants into separate strip dirs and let Milestone-0 EER pick the winner:
+
+```bash
+python prepare_strips.py --src ~/PolyU_raw --dst ~/PolyU_strips_full                  # enhance+softfill (prior behaviour)
+python prepare_strips.py --src ~/PolyU_raw --dst ~/PolyU_strips_nosoft --no_soft_fill # likely best
+python prepare_strips.py --src ~/PolyU_raw --dst ~/PolyU_strips_raw --no_soft_fill --no_enhance
 ```
 
 ### 4.3 Make identity splits
@@ -228,6 +255,27 @@ python make_splits.py \
     --out splits_polyu.json
 # Prints: VIS-only N, NIR-only N, Both N, train/val/test counts
 ```
+
+### 4.4 Alignment diagnostic (Phase 1 — run before any retraining)
+
+Checks whether VIS segmentation quality is destroying the VIS/NIR geometric alignment
+that co-registered PolyU should give us for free (the suspected cause of the ~17% EER ceiling).
+
+```bash
+# A/B the two backends on the SAME eyes — compare ncc@0 / |best-shift| (higher ncc@0, smaller shift = better)
+python tools/diagnose_alignment.py --src ~/PolyU_raw --out eval_results/diag_cvrl     --n 12 --backend cvrl
+python tools/diagnose_alignment.py --src ~/PolyU_raw --out eval_results/diag_openiris --n 12 --backend openiris
+
+# open-iris-only: NIR-geometry oracle (proves alignment is the cause; requires --backend openiris)
+python tools/diagnose_alignment.py --src ~/PolyU_raw --out eval_results/diag_openiris --n 12 --backend openiris --oracle
+```
+
+Then SCP the `eval_results/diag_*` dirs back to Windows and read:
+- `strip_<eye>.png` — VIS / NIR / |diff| montage. Do iris features line up column-for-column?
+- console `|best-shift|` and `ncc@0` — **the headline A/B number.** CVRL should give higher `ncc@0`
+  and smaller `|best-shift|` than open-iris if the segmentation swap fixed the alignment.
+- `seg_<eye>.png` — open-iris backend only: fitted contours on VIS | NIR.
+- `oracle_<eye>.png` (open-iris `--oracle` only) — if oracle aligns but `strip_*` doesn't, VIS seg confirmed.
 
 ---
 

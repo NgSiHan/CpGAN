@@ -78,6 +78,11 @@ def main():
     ap.add_argument("--batch_size",  type=int,   default=256)
     ap.add_argument("--lr",          type=float, default=1e-4)
     ap.add_argument("--feat_dim",    type=int,   default=512)
+    ap.add_argument("--shared_encoder", action="store_true",
+                    help="Tie VIS and NIR into ONE encoder (true Siamese). Forces a single "
+                         "shared embedding space by construction — the fix for ArcFace's "
+                         "two-encoders-drift-apart failure (see HANDOVER §3). Both strips are "
+                         "1-channel, so one trunk is valid.")
     ap.add_argument("--margin",      type=float, default=2.0,
                     help="Contrastive margin (unit-sphere squared-L2, max=4.0). "
                          "2.5 if impostor distances plateau below 2.0.")
@@ -132,14 +137,23 @@ def main():
 
     # --- Models ---
     net_vis  = ResNetIrisEncoder(feat_dim=args.feat_dim).to(device)
-    net_nir  = ResNetIrisEncoder(feat_dim=args.feat_dim).to(device)
+    if args.shared_encoder:
+        net_nir = net_vis          # same object -> one shared space by construction
+        print("Shared encoder: ONE ResNetIrisEncoder for both VIS and NIR (tied weights)")
+    else:
+        net_nir = ResNetIrisEncoder(feat_dim=args.feat_dim).to(device)
     arc_head = ArcFaceHead(feat_dim=args.feat_dim, n_cls=n_cls,
                            s=args.arc_s, m=args.arc_m).to(device)
 
     # --- Optimizer ---
     # When lambda_arc == 0 (CUVIRIS fine-tune) the ArcFace head receives no
     # gradient — exclude it from the optimizer to avoid weight decay on a dead head.
-    enc_params = list(net_vis.parameters()) + list(net_nir.parameters())
+    # Shared encoder: net_nir IS net_vis, so listing both would double-count every
+    # param (double-step in Adam). Use net_vis's params only when tied.
+    if args.shared_encoder:
+        enc_params = list(net_vis.parameters())
+    else:
+        enc_params = list(net_vis.parameters()) + list(net_nir.parameters())
     if args.lambda_arc > 0:
         opt_params = enc_params + list(arc_head.parameters())
     else:
@@ -316,6 +330,7 @@ def main():
                     "n_cls":      n_cls,
                     "arc_s":      args.arc_s,
                     "arc_m":      args.arc_m,
+                    "shared_encoder": args.shared_encoder,
                 }, ckpt_path)
                 print(f"  -> saved best checkpoint (EER={best_eer:.4f})")
                 plot_results(results, args.save_dir, tag=f"val_ep{epoch:03d}")
@@ -331,6 +346,7 @@ def main():
                 "val_eer":  best_eer,
                 "feat_dim": args.feat_dim,
                 "n_cls":    n_cls,
+                "shared_encoder": args.shared_encoder,
             }, Path(args.save_dir) / f"epoch_{epoch:03d}.pt")
 
     print(f"\nTraining complete. Best val EER: {best_eer:.4f}")

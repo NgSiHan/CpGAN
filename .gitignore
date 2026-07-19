@@ -3,3 +3,6 @@ PolyU_raw.zip
 eval_results
 diag
 cpgan_*
+checkpoints/
+*.pt
+*.zip
