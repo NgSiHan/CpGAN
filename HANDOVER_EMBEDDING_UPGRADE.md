@@ -318,6 +318,39 @@ Reports `EER mean ± std` over all 47 subjects — the defensible CUVIRIS number
 
 ---
 
-*Origin: consolidated 2026-07-18 from the Coupled-GAN project history. The wider `C:\dev` folder is NOT
-attached to your session — all external paths you need are in §5. If a path is missing, ask the user to
-confirm it rather than guessing.*
+## 10. Data-lever findings — the actionable conclusion (2026-07-19)
+
+After architecture was exhausted (see status banner + §2/§3), we tested the real lever: **more paired
+data.** Protocol = append new identities to the champion's TRAIN split only, keep val/test = `splits_cvrl.json`,
+train the tiny-conv champion, eval on the SAME fixed 64-id PolyU test. Results:
+
+| Training pool | added ids | Test EER | GAR@1e-3 | Impostor dist |
+|---|---|---|---|---|
+| S1 only | — | 0.1531 | 0.110 | 1.977 |
+| S1 + PolyU **Session 2** (same sensor, co-registered) | +22 | **0.1358** | 0.113 | 1.983 |
+| S1 + S2 + **UTIRIS** (diff sensor, NON-co-registered) | +126 | 0.1478 | 0.033 | 1.905 |
+
+**The curve is non-monotonic — this is the key result:**
+- **Matched-domain data helps.** PolyU S2 (same rig, co-registered) improved EER ~1.7pt.
+- **Mismatched-domain data HURTS.** UTIRIS, despite 6× more identities, made EER *worse* and collapsed
+  GAR@1e-3. Signature: impostor distance contracted (1.98→1.90) — cross-domain data compressed the space
+  and eroded separation.
+
+**→ The lever is paired data from the MATCHED sensor + registration protocol, not raw iris count.**
+For the eventual product this is the whole ballgame: **the capture campaign must match the deployment rig**
+(phone-VIS + scanner-NIR, same co-registration handling). Do NOT pad training with public iris sets from
+other sensors — it can actively degrade the deployment metric.
+
+Caveats / open thread: single-seed (repeat for a reportable number); UTIRIS confounds domain with
+non-co-registration (`train_m0` uses joint-roll; UTIRIS needs independent roll) — decomposing needs
+per-source roll, a real `dataset.py`/`train_m0.py` change, only worth it to answer "does ANY aligned
+extra data help." The `--dataset utiris` parser also had ~20% parse-skips (326/1612) — fix before relying
+on UTIRIS. New code this phase: `prepare_strips.py --id_prefix` + `--dataset ubiris/utiris`,
+`pretrain_ubiris.py`, `--shared_encoder` (dead end), `test_shared_encoder.py`. Split records:
+`splits_cvrl_s1s2.json`, `splits_cvrl_s1s2_ut.json`.
+
+---
+
+*Origin: consolidated 2026-07-18 from the Coupled-GAN project history; extended 2026-07-19 with the
+architecture-exhaustion + data-lever results. The wider `C:\dev` folder is NOT attached to your session —
+all external paths you need are in §5. If a path is missing, ask the user to confirm it rather than guessing.*
