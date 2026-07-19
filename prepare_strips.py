@@ -64,6 +64,19 @@ def parse_meta(path: Path, dataset: str):
 
     If a real folder differs, fix THIS function.
     """
+    if dataset == "ubiris":
+        # UBIRIS.v2 is VIS-only; identity is the filename class token C<n>
+        # (e.g. C137_S2_I5.tiff -> "137"). Classes are already per-eye, so there is no
+        # L/R split. eye_side defaults to 'left' for a consistent unwrap orientation —
+        # fine for VIS pretraining, and roll aug during fine-tune covers rotation.
+        # ponytail: filename regex only; no dir structure assumed. Fix the regex if the
+        # real UBIRIS filenames differ (smoke-test one image first).
+        import re
+        m = re.match(r"[Cc](\d+)", path.stem)
+        if m is None:
+            return None
+        return m.group(1), "E", "VIS", "left"
+
     low = [p.lower() for p in path.parts]
 
     # --- modality: from a path component, else fall back to extension (CUVIRIS NIR = .bmp)
@@ -97,7 +110,7 @@ def main():
     ap = argparse.ArgumentParser(description="RAW iris -> 64x512 normalized strips")
     ap.add_argument("--src", required=True, help="root folder of RAW images (searched recursively)")
     ap.add_argument("--dst", required=True, help="output root for strips")
-    ap.add_argument("--dataset", default="polyu", choices=["polyu", "cuviris"])
+    ap.add_argument("--dataset", default="polyu", choices=["polyu", "cuviris", "ubiris"])
     # --- segmentation backend ---
     ap.add_argument("--backend", default="cvrl", choices=["cvrl", "openiris"],
                     help="cvrl = Notre Dame VIS-capable segmenter (default); openiris = Worldcoin NIR-only")

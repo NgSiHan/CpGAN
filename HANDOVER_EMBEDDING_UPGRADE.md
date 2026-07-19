@@ -83,6 +83,13 @@ matching. Margin on the L2-normalized unit sphere must exceed 2.0 (impostors clu
 
 ## 3. Why ArcFace regressed — and the fix (this is Lever 1, the main modification)
 
+> **REFUTED (2026-07-19).** Lever 1's central claim below — that tying the encoder weights is "the
+> biggest lever" — was tested and is **wrong**. Weight-tying HURTS at both capacities:
+> tiny-conv non-shared 0.135 vs shared 0.204; ResNet shared 0.385 vs two-encoder ArcFace 0.307.
+> The shared space comes from the contrastive **loss**, not shared **weights** — VIS and NIR need
+> different low-level filters. Keep **separate** encoders. `--shared_encoder` exists but is a dead end.
+> The remaining real lever is Phase 2 (pretrain a *separate* VIS encoder on UBIRIS). Read §3 as history.
+
 **What happened:** we use **two independent encoders** (one VIS, one NIR). ArcFace made *each* encoder
 good at classifying *its own* spectrum, but the two networks drifted to **different regions of the 512-d
 space** and both still scored well on ArcFace. The cross-modal glue (`--lambda_contrast 0.1`) was far
